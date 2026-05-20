@@ -3,7 +3,7 @@ version: '3.8'
 services:
   order-service:
     build:
-      context: ./order-service
+      context: .
       dockerfile: Dockerfile
     container_name: flashsale-order
     ports:
