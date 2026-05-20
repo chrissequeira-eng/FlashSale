@@ -4,6 +4,7 @@ services:
   mysql:
     image: mysql:8.0
     container_name: flashsale-mysql
+    restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: Chris@2026
       MYSQL_DATABASE: flashsale
@@ -16,30 +17,19 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    networks:
-      - flashsale-net
 
   product-service:
-    build:
-      context: ./product-service
-      dockerfile: Dockerfile
+    image: chrisnathansequeira/flashsale-product:latest
     container_name: flashsale-product
-    ports:
-      - "8081:8081"
+    restart: unless-stopped
+    network_mode: host
     environment:
-      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/flashsale?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+      SPRING_DATASOURCE_URL: jdbc:mysql://localhost:3306/flashsale?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
       SPRING_DATASOURCE_USERNAME: root
-      SPRING_DATASOURCE_PASSWORD: Chris@2026
+      SPRING_DATASOURCE_PASSWORD: password
     depends_on:
       mysql:
         condition: service_healthy
-    networks:
-      - flashsale-net
-    restart: on-failure
 
 volumes:
   mysql-data:
-
-networks:
-  flashsale-net:
-    driver: bridge

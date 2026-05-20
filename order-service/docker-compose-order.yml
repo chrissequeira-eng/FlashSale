@@ -2,19 +2,11 @@ version: '3.8'
 
 services:
   order-service:
-    build:
-      context: ./order-service
-      dockerfile: Dockerfile
+    image: chrisnathansequeira/flashsale-order:latest
     container_name: flashsale-order
+    restart: unless-stopped
     ports:
       - "8080:8080"
     environment:
       PRODUCT_SERVICE_URL: http://${PRODUCT_PRIVATE_IP}:8081
       INSTANCE_ID: ${INSTANCE_ID:-unknown}
-    networks:
-      - flashsale-net
-    restart: on-failure
-
-networks:
-  flashsale-net:
-    driver: bridge

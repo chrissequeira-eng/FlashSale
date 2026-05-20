@@ -1,127 +1,109 @@
-# Flash Sale System — Complete AWS Deployment Guide
+# Flash Sale System — AWS Deployment Guide (Docker on EC2)
 
-> **Read this top to bottom.** Each section builds on the previous one.
-> Commands marked with `$` run on your local machine. Commands marked `[EC2]` run on your EC2 instance.
+> Everything runs inside Docker on EC2. No Maven, no Java installation needed on the server.
+> Commands marked `[LOCAL]` run on your Windows machine. Commands marked `[EC2]` run on your EC2 instance via SSH.
 
 ---
 
 ## TABLE OF CONTENTS
 
-1. [Run Locally with Docker Compose](#1-run-locally)
-2. [Deploy to EC2 (Both Services)](#2-deploy-to-ec2)
-3. [Create an AMI (Golden Image)](#3-create-ami)
-4. [Create a Launch Template](#4-launch-template)
-5. [Create the Application Load Balancer](#5-create-alb)
-6. [Create the Auto Scaling Group](#6-create-asg)
-7. [Connect ALB to ASG](#7-connect-alb-asg)
-8. [Configure CloudWatch Alarms](#8-cloudwatch-alarms)
-9. [Run Load Tests](#9-load-testing)
-10. [Understanding Auto Scaling Concepts](#10-concepts)
+1. [Prepare Docker Images Locally](#1-prepare-images)
+2. [Launch EC2 Instances](#2-launch-ec2)
+3. [Set Up Product EC2 (MySQL + Product Service)](#3-product-ec2)
+4. [Set Up Order EC2 (Order Service)](#4-order-ec2)
+5. [Test Both Services Are Talking](#5-test-services)
+6. [Create AMI from Order EC2](#6-create-ami)
+7. [Create Launch Template](#7-launch-template)
+8. [Create Application Load Balancer](#8-create-alb)
+9. [Create Auto Scaling Group](#9-create-asg)
+10. [Run Load Tests and Observe Scaling](#10-load-testing)
+11. [Auto Scaling Concepts Explained](#11-concepts)
 
 ---
 
-## 1. Run Locally
+## 1. Prepare Docker Images Locally
 
-**Prerequisites:** Docker Desktop installed and running.
+We build images on your local machine and push to Docker Hub.
+EC2 instances just pull and run — no build step on EC2 at all.
 
-```bash
-# Clone or create the project, then from the root folder:
-$ docker-compose up --build
+### 1a. Create a free Docker Hub account
+Go to https://hub.docker.com and sign up.
 
-# You should see:
-#   mysql      → Started
-#   product-service → Started on :8081
-#   order-service   → Started on :8080
+### 1b. Login locally
+
+```powershell
+[LOCAL] docker login
 ```
 
-**Test it works:**
+### 1c. Build and push Product Service
 
-```bash
-# List products
-$ curl http://localhost:8081/products
+```powershell
+[LOCAL] cd flash-sale-system
 
-# Place an order
-$ curl -X POST http://localhost:8080/orders \
-  -H "Content-Type: application/json" \
-  -d '{"productId": 1, "quantity": 1}'
-
-# Check health
-$ curl http://localhost:8080/actuator/health
-$ curl http://localhost:8081/actuator/health
+[LOCAL] docker build -t YOUR_DOCKERHUB_USERNAME/flashsale-product:latest ./product-service
+[LOCAL] docker push YOUR_DOCKERHUB_USERNAME/flashsale-product:latest
 ```
 
-**Expected response:**
-```json
-{
-  "status": "SUCCESS",
-  "message": "Order placed successfully",
-  "productId": 1,
-  "quantity": 1,
-  "instanceId": "docker-local"
-}
+### 1d. Build and push Order Service
+
+```powershell
+[LOCAL] docker build -t YOUR_DOCKERHUB_USERNAME/flashsale-order:latest ./order-service
+[LOCAL] docker push YOUR_DOCKERHUB_USERNAME/flashsale-order:latest
 ```
+
+Verify both images appear at: https://hub.docker.com/repositories
 
 ---
 
-## 2. Deploy to EC2
+## 2. Launch EC2 Instances
 
-### 2a. Launch Two EC2 Instances
+Go to **AWS Console → EC2 → Launch Instance** and launch TWO instances.
 
-Go to **AWS Console → EC2 → Launch Instance**.
+| Setting | Value |
+|---|---|
+| AMI | Amazon Linux 2023 (free tier) |
+| Instance type | t2.micro (free tier) |
+| Key pair | Create new → save the .pem file |
+| Storage | 8 GB default |
 
-**Settings for BOTH instances:**
-- AMI: `Amazon Linux 2023` (free tier eligible)
-- Instance type: `t2.micro` (free tier — 1 vCPU, 1GB RAM)
-- Key pair: Create or select an existing key pair (save the `.pem` file!)
-- Security Group: Create new with these rules:
+### Security Group Rules (one group, used by both instances)
 
-| Type  | Protocol | Port | Source    | Purpose                          |
-|-------|----------|------|-----------|----------------------------------|
-| SSH   | TCP      | 22   | Your IP   | SSH access                       |
-| HTTP  | TCP      | 8080 | Anywhere  | Order Service                    |
-| HTTP  | TCP      | 8081 | Anywhere  | Product Service                  |
-| HTTP  | TCP      | 3306 | Anywhere  | MySQL (for product-service only) |
+| Type | Protocol | Port | Source | Purpose |
+|---|---|---|---|---|
+| SSH | TCP | 22 | My IP | SSH access |
+| Custom TCP | TCP | 8080 | Anywhere | Order Service |
+| Custom TCP | TCP | 8081 | Anywhere | Product Service |
+| Custom TCP | TCP | 80 | Anywhere | ALB listener |
+| Custom TCP | TCP | 3306 | Anywhere | MySQL |
 
-> **Cost note:** t2.micro is free for 750 hours/month in your first year.
-
-Launch **two separate instances:**
-- `flashsale-product` — for MySQL + Product Service
-- `flashsale-order` — for Order Service (this becomes your AMI base)
+Name your instances:
+- `flashsale-product` — runs MySQL + Product Service
+- `flashsale-order`   — runs Order Service (becomes AMI base)
 
 ---
 
-### 2b. Install Docker on Both EC2 Instances
+## 3. Set Up Product EC2
 
-SSH into each instance:
+SSH in:
 
-```bash
-$ ssh -i your-key.pem ec2-user@<EC2_PUBLIC_IP>
+```powershell
+[LOCAL] ssh -i "your-key.pem" ec2-user@<PRODUCT_EC2_PUBLIC_IP>
 ```
 
-Then run:
+### 3a. Install Docker
 
 ```bash
 [EC2] sudo yum update -y
 [EC2] sudo yum install docker -y
 [EC2] sudo service docker start
 [EC2] sudo usermod -aG docker ec2-user
-[EC2] newgrp docker  # Apply group change without logout
-
-# Verify
+[EC2] newgrp docker
 [EC2] docker --version
 ```
 
----
-
-### 2c. Set Up Product Service Instance
-
-SSH into `flashsale-product`:
+### 3b. Start MySQL
 
 ```bash
-# Create a directory for configs
-[EC2] mkdir ~/flashsale && cd ~/flashsale
-
-# Start MySQL in Docker
 [EC2] docker run -d \
   --name mysql \
   --restart unless-stopped \
@@ -130,468 +112,355 @@ SSH into `flashsale-product`:
   -p 3306:3306 \
   mysql:8.0
 
-# Wait ~30 seconds for MySQL to initialize, then verify:
-[EC2] docker logs mysql | tail -20
-
-# Build and run Product Service
-# Option A: Pull from Docker Hub (if you pushed it there)
-# Option B: Build directly on EC2
-
-# OPTION B - Build on EC2:
-[EC2] sudo yum install git maven java-21-amazon-corretto -y
-
-# Copy your product-service folder to EC2 (run this on YOUR machine):
-$ scp -i your-key.pem -r ./product-service ec2-user@<PRODUCT_EC2_IP>:~/flashsale/
-
-# Back on EC2 - build and run:
-[EC2] cd ~/flashsale/product-service
-[EC2] mvn clean package -DskipTests
-[EC2] java -jar target/product-service-1.0.0.jar \
-  --spring.datasource.url=jdbc:mysql://localhost:3306/flashsale?useSSL=false\&allowPublicKeyRetrieval=true\&serverTimezone=UTC \
-  --spring.datasource.username=root \
-  --spring.datasource.password=password &
-
-# Test it
-[EC2] curl http://localhost:8081/products
+# Wait 30 seconds for MySQL to initialize
+[EC2] sleep 30
+[EC2] docker logs mysql | tail -5
+# Look for: ready for connections
 ```
 
-> **Note the PRIVATE IP of this instance** — you'll need it for Order Service.
-> Find it in AWS Console under EC2 → Instances → Private IPv4 address.
+### 3c. Run Product Service
+
+```bash
+# Using --network host so product-service can reach mysql via localhost
+[EC2] docker run -d \
+  --name flashsale-product \
+  --restart unless-stopped \
+  --network host \
+  -e SPRING_DATASOURCE_URL="jdbc:mysql://localhost:3306/flashsale?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC" \
+  -e SPRING_DATASOURCE_USERNAME=root \
+  -e SPRING_DATASOURCE_PASSWORD=password \
+  YOUR_DOCKERHUB_USERNAME/flashsale-product:latest
+```
+
+### 3d. Verify
+
+```bash
+# Wait ~30 seconds for Spring Boot to start
+[EC2] sleep 30
+[EC2] curl http://localhost:8081/products
+# Should return JSON list of 3 products
+
+[EC2] curl http://localhost:8081/actuator/health
+# Should return {"status":"UP"}
+```
+
+### 3e. Save the Private IP — needed for Order Service
+
+```bash
+[EC2] curl http://169.254.169.254/latest/meta-data/local-ipv4
+# Example: 172.31.47.149
+# COPY THIS — you will paste it in the next section
+```
 
 ---
 
-### 2d. Set Up Order Service Instance
+## 4. Set Up Order EC2
 
-SSH into `flashsale-order`:
+SSH in:
+
+```powershell
+[LOCAL] ssh -i "your-key.pem" ec2-user@<ORDER_EC2_PUBLIC_IP>
+```
+
+### 4a. Install Docker
 
 ```bash
-# Copy order-service to EC2:
-$ scp -i your-key.pem -r ./order-service ec2-user@<ORDER_EC2_IP>:~/flashsale/
+[EC2] sudo yum update -y
+[EC2] sudo yum install docker -y
+[EC2] sudo service docker start
+[EC2] sudo usermod -aG docker ec2-user
+[EC2] newgrp docker
+```
 
-[EC2] sudo yum install java-21-amazon-corretto maven -y
-[EC2] cd ~/flashsale/order-service
-[EC2] mvn clean package -DskipTests
+### 4b. Run Order Service
 
-# Start with Product Service URL pointing to the product instance
-# Replace <PRODUCT_PRIVATE_IP> with the actual private IP
-[EC2] PRODUCT_SERVICE_URL=http://<PRODUCT_PRIVATE_IP>:8081 \
-      INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id) \
-      java -jar target/order-service-1.0.0.jar &
+```bash
+# Get this instance's ID
+[EC2] INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
 
-# Test it
+# Replace 172.31.XX.XX with the private IP you saved from step 3e
+[EC2] docker run -d \
+  --name flashsale-order \
+  --restart unless-stopped \
+  -p 8080:8080 \
+  -e PRODUCT_SERVICE_URL=http://172.31.XX.XX:8081 \
+  -e INSTANCE_ID=$INSTANCE_ID \
+  YOUR_DOCKERHUB_USERNAME/flashsale-order:latest
+```
+
+### 4c. Verify
+
+```bash
+[EC2] sleep 20
+[EC2] curl http://localhost:8080/actuator/health
+# Should return {"status":"UP"}
+
 [EC2] curl -X POST http://localhost:8080/orders \
   -H "Content-Type: application/json" \
   -d '{"productId": 1, "quantity": 1}'
+# Should return {"status":"SUCCESS",...}
 ```
 
 ---
 
-## 3. Create an AMI (Golden Image)
+## 5. Test From Your Local Machine
 
-An AMI (Amazon Machine Image) is a **snapshot of your EC2 instance**.
-The Auto Scaling Group uses this to launch new identical instances.
+```powershell
+# Test Product Service via public IP
+[LOCAL] curl http://<PRODUCT_EC2_PUBLIC_IP>:8081/products
 
-1. Go to **EC2 → Instances**
-2. Select your `flashsale-order` instance
-3. Click **Actions → Image and templates → Create image**
-4. Settings:
-   - Image name: `flashsale-order-service-v1`
-   - No reboot: ✅ (keeps instance running during snapshot)
-5. Click **Create image**
-6. Wait 3-5 minutes for the AMI to become `available`
+# Test Order Service via public IP
+[LOCAL] curl -X POST http://<ORDER_EC2_PUBLIC_IP>:8080/orders `
+  -H "Content-Type: application/json" `
+  -d '{\"productId\": 1, \"quantity\": 1}'
+```
 
-> **Why create an AMI?**
-> Without an AMI, each new Auto Scaling instance would start blank and need manual setup.
-> With an AMI, new instances start pre-configured with your app installed.
+Both must work before continuing.
 
 ---
 
-## 4. Create a Launch Template
+## 6. Create AMI from Order EC2
 
-A Launch Template tells the ASG: "when you need to launch a new instance, use THESE settings."
+1. Go to **EC2 → Instances**
+2. Select `flashsale-order`
+3. Click **Actions → Image and templates → Create image**
+4. Settings:
+   - Image name: `flashsale-order-v1`
+   - No reboot: ✅
+5. Click **Create image**
+6. Go to **EC2 → AMIs** — wait until status = `available` (3-5 min)
 
-1. Go to **EC2 → Launch Templates → Create launch template**
-2. Settings:
+The AMI captures: OS + Docker installed + your Order image already pulled.
+New ASG instances boot from this — no downloading or building needed.
 
-   **Launch template name:** `flashsale-order-lt`
+---
 
-   **AMI:** Select `flashsale-order-service-v1` (your AMI from step 3)
+## 7. Create Launch Template
 
-   **Instance type:** `t2.micro`
+**EC2 → Launch Templates → Create launch template**
 
-   **Key pair:** Select your existing key pair
+| Setting | Value |
+|---|---|
+| Name | `flashsale-order-lt` |
+| AMI | `flashsale-order-v1` (your AMI) |
+| Instance type | `t2.micro` |
+| Key pair | Your existing key pair |
+| Security Group | Your existing security group |
 
-   **Security Group:** Same security group you created earlier
+### Advanced Details → User Data
 
-   **Advanced details → User data:**
-   Paste this script (it runs when each new instance starts):
+This script runs every time ASG launches a new instance:
 
 ```bash
 #!/bin/bash
-# This script runs ONCE when a new EC2 instance starts from this template.
 
-# Get the instance's own ID from EC2 metadata service
+# Get this instance's ID
 INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
 
-# Get Product Service private IP - REPLACE THIS with your actual IP
-PRODUCT_IP="<PRODUCT_PRIVATE_IP>"
+# REPLACE with your actual Product EC2 private IP from step 3e
+PRODUCT_PRIVATE_IP="172.31.XX.XX"
 
-# Start the Order Service
-# It automatically sets instanceId so responses show WHICH instance handled the request
-cd /home/ec2-user/flashsale/order-service
-nohup java -jar target/order-service-1.0.0.jar \
-  --product.service.url=http://${PRODUCT_IP}:8081 \
-  --instance.id=${INSTANCE_ID} \
-  > /home/ec2-user/app.log 2>&1 &
+# Start Docker
+sudo service docker start
 
-echo "Order Service started with instanceId: $INSTANCE_ID"
+# Pull latest image
+docker pull YOUR_DOCKERHUB_USERNAME/flashsale-order:latest
+
+# Clean up any old container
+docker stop flashsale-order 2>/dev/null || true
+docker rm flashsale-order 2>/dev/null || true
+
+# Start Order Service
+docker run -d \
+  --name flashsale-order \
+  --restart unless-stopped \
+  -p 8080:8080 \
+  -e PRODUCT_SERVICE_URL=http://${PRODUCT_PRIVATE_IP}:8081 \
+  -e INSTANCE_ID=${INSTANCE_ID} \
+  YOUR_DOCKERHUB_USERNAME/flashsale-order:latest
 ```
 
-3. Click **Create launch template**
+Click **Create launch template**.
 
 ---
 
-## 5. Create the Application Load Balancer
+## 8. Create Application Load Balancer
 
-The ALB receives all incoming traffic and distributes it across Order Service instances.
-
-### 5a. Create a Target Group First
+### 8a. Create Target Group First
 
 **EC2 → Target Groups → Create target group**
 
-- Target type: `Instances`
-- Target group name: `flashsale-order-tg`
-- Protocol: `HTTP`
-- Port: `8080`
-- VPC: Your default VPC
-- Health check:
-  - Protocol: `HTTP`
-  - Path: `/actuator/health`   ← Spring Actuator health endpoint
-  - Healthy threshold: `2`     ← 2 consecutive successes = healthy
-  - Unhealthy threshold: `2`   ← 2 consecutive failures = unhealthy
-  - Timeout: `5 seconds`
-  - Interval: `30 seconds`
+| Setting | Value |
+|---|---|
+| Target type | Instances |
+| Name | `flashsale-order-tg` |
+| Protocol | HTTP |
+| Port | 8080 |
+| VPC | Default VPC |
+| Health check path | `/actuator/health` |
+| Healthy threshold | 2 |
+| Unhealthy threshold | 2 |
+| Interval | 30 seconds |
 
-Click **Next**, then **Create target group** (don't add instances yet — ASG will do this).
+Click **Create target group** — do NOT add instances manually.
 
----
-
-### 5b. Create the ALB
+### 8b. Create the ALB
 
 **EC2 → Load Balancers → Create Load Balancer → Application Load Balancer**
 
-- Name: `flashsale-alb`
-- Scheme: `Internet-facing` (accepts traffic from internet)
-- IP address type: `IPv4`
-- VPC: Your default VPC
-- Availability Zones: Select **at least 2** AZs (required for ALB)
-- Security Group: Same security group (needs port 80 open)
-- Listeners:
-  - Protocol: `HTTP`, Port: `80`
-  - Default action: Forward to `flashsale-order-tg`
+| Setting | Value |
+|---|---|
+| Name | `flashsale-alb` |
+| Scheme | Internet-facing |
+| VPC | Default VPC |
+| Availability Zones | Select ALL available AZs |
+| Security Group | Your existing security group |
+| Listener | HTTP port 80 → forward to `flashsale-order-tg` |
 
 Click **Create load balancer**.
 
-> Note the ALB's **DNS name** — this is your entry point for load tests.
-> It looks like: `flashsale-alb-123456.us-east-1.elb.amazonaws.com`
+Save the **DNS name** — looks like:
+`flashsale-alb-123456.ap-south-1.elb.amazonaws.com`
 
 ---
 
-## 6. Create the Auto Scaling Group
-
-The ASG monitors CPU and automatically adds/removes Order Service instances.
+## 9. Create Auto Scaling Group
 
 **EC2 → Auto Scaling Groups → Create Auto Scaling group**
 
-**Step 1 - Name and launch template:**
+**Step 1 — Name and template:**
 - Name: `flashsale-order-asg`
 - Launch template: `flashsale-order-lt`
 
-**Step 2 - Network:**
-- VPC: Default VPC
-- Availability Zones: Select **same AZs** as your ALB
+**Step 2 — Network:**
+- VPC: Default
+- Availability Zones: Same as ALB (select all)
 
-**Step 3 - Load balancing:**
-- Attach to existing load balancer
+**Step 3 — Load balancing:**
+- Attach to existing load balancer ✅
 - Target groups: `flashsale-order-tg`
-- Health checks: Enable ELB health checks ✅
+- Health check type: ELB ✅
 
-**Step 4 - Group size:**
-- Desired capacity: `1`
-- Minimum capacity: `1`
-- Maximum capacity: `2`
+**Step 4 — Group size:**
+- Desired: `1`
+- Minimum: `1`
+- Maximum: `2`
 
-**Step 5 - Scaling policies:**
-Choose **Target tracking scaling policy**:
-- Policy name: `cpu-scaling-policy`
-- Metric type: `Average CPU Utilization`
-- Target value: `60`   ← Scale out when CPU > 60%, scale in when < 60%
+**Step 5 — Scaling policy:**
+- Type: Target tracking
+- Metric: Average CPU Utilization
+- Target value: `60`
 
-> Under the hood this creates two CloudWatch alarms automatically.
-
-**Step 6 - Notifications:** Skip for now.
+**Step 6 — Instance warmup:**
+- Default instance warmup: `120 seconds`
 
 Click **Create Auto Scaling group**.
 
----
-
-## 7. Connect ALB to ASG
-
-The ASG is already connected (you chose the target group in Step 6).
-
-**Verify the connection:**
-1. EC2 → Target Groups → `flashsale-order-tg` → Targets tab
-2. You should see your instance in the list with status `healthy`
-
-**If the health check shows unhealthy:**
-- SSH into the instance and check: `curl http://localhost:8080/actuator/health`
-- Check app logs: `tail -f ~/app.log`
-- Common issue: app hasn't finished starting (takes ~30s for Spring Boot)
+### Verify health:
+EC2 → Target Groups → `flashsale-order-tg` → Targets tab
+Wait 2 minutes → instance should show `healthy`
 
 ---
 
-## 8. Configure CloudWatch Alarms
+## 10. Run Load Tests and Observe Scaling
 
-The target tracking policy creates alarms automatically, but let's create
-explicit alarms so we can observe them clearly.
+```powershell
+# Replace with your actual ALB DNS name
+[LOCAL] k6 run k6-tests/smoke-test.js -e BASE_URL=http://flashsale-alb-123456.ap-south-1.elb.amazonaws.com
 
-**CloudWatch → Alarms → Create alarm**
+[LOCAL] k6 run k6-tests/load-test.js -e BASE_URL=http://flashsale-alb-123456.ap-south-1.elb.amazonaws.com
 
-### Scale-Out Alarm (CPU High)
-- Metric: EC2 → By Auto Scaling Group → CPUUtilization → `flashsale-order-asg`
-- Statistic: Average
-- Period: 1 minute
-- Threshold: Greater than 60 for 2 consecutive periods
-- Action: Already handled by ASG policy
-
-### Scale-In Alarm (CPU Low)
-- Same metric
-- Threshold: Less than 20 for 5 consecutive periods
-- Action: Already handled by ASG policy
-
-**Why 5 periods for scale-in but 2 for scale-out?**
-See section 10 (Concepts) for the explanation.
-
----
-
-## 9. Load Testing
-
-### Install k6
-
-```bash
-# macOS
-$ brew install k6
-
-# Linux
-$ sudo gpg -k
-$ sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
-    --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
-$ echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
-    | sudo tee /etc/apt/sources.list.d/k6.list
-$ sudo apt-get update && sudo apt-get install k6
+[LOCAL] k6 run k6-tests/spike-test.js -e BASE_URL=http://flashsale-alb-123456.ap-south-1.elb.amazonaws.com
 ```
 
-### Test 1: Smoke Test (verify it works)
+### Open these tabs while load test runs:
 
-```bash
-$ cd k6-tests
-$ k6 run smoke-test.js -e BASE_URL=http://<YOUR-ALB-DNS>
-```
-
-Open CloudWatch while this runs. CPU should be low (~10-20%).
-
----
-
-### Test 2: Load Test (trigger auto scaling)
-
-```bash
-$ k6 run load-test.js -e BASE_URL=http://<YOUR-ALB-DNS>
-```
-
-**What to watch simultaneously (open these in separate browser tabs):**
-
-| AWS Console Page | What to Look For |
+| AWS Console Tab | Watch For |
 |---|---|
-| EC2 → Auto Scaling Groups → Activity | Scale-out event appearing |
-| CloudWatch → Alarms | CPUUtilization alarm going from OK → ALARM |
-| EC2 → Target Groups → Targets | New instance appearing, going healthy |
+| EC2 → Auto Scaling Groups → Activity | New scale-out event |
+| CloudWatch → Alarms | CPU alarm: OK → ALARM |
+| EC2 → Target Groups → Targets | New instance → healthy |
 | EC2 → Instances | New instance launching |
-| k6 terminal output | `instanceId` rotating between two instances |
+| k6 terminal | Two different instanceIds alternating |
 
-**Timeline of what happens:**
+### What happens (timeline):
+
 ```
-00:00 - Load test starts (50 users)
-02:00 - CPU crosses 60%
-02:00 - CloudWatch alarm fires
-02:00 - ASG decides to launch new instance
-03:00 - New EC2 instance starts booting (~1 min)
-03:30 - Spring Boot app starts (~30 sec)
-04:00 - ALB health check passes, instance becomes "healthy"
-04:00 - ALB starts routing traffic to both instances
-04:00 - k6 output shows TWO different instanceIds
-```
-
----
-
-### Test 3: Spike Test (flash sale simulation)
-
-```bash
-$ k6 run spike-test.js -e BASE_URL=http://<YOUR-ALB-DNS>
+00:00  Load test starts
+01:00  CPU climbs above 60%
+02:00  CloudWatch alarm fires
+02:00  ASG launches new instance from AMI
+02:30  EC2 boots
+03:00  User Data script runs → Docker starts container
+03:20  Spring Boot starts inside container
+04:00  Health check passes twice → instance = healthy
+04:00  ALB routes traffic to BOTH instances
+04:00  k6 output shows two different instanceIds  ← load balancing confirmed
 ```
 
-This simulates 500 users hitting the API within 10 seconds.
-Observe: initial latency spike → stock sells out → auto scaling kicks in (too late for the spike, but valuable learning).
+### Reset stock between tests:
 
----
-
-### Reset Stock for More Tests
-
-After stock runs out, reset it via Product Service:
-
-```bash
-# SSH into the product-service EC2
-$ ssh -i your-key.pem ec2-user@<PRODUCT_EC2_IP>
-
-# Connect to MySQL and reset stock
-[EC2] docker exec -it mysql mysql -u root -ppassword flashsale
-
-mysql> UPDATE products SET stock = 100 WHERE id = 1;
-mysql> UPDATE products SET stock = 50  WHERE id = 2;
-mysql> UPDATE products SET stock = 200 WHERE id = 3;
-mysql> SELECT * FROM products;
-mysql> exit;
+```powershell
+[LOCAL] ssh -i "your-key.pem" ec2-user@<PRODUCT_EC2_PUBLIC_IP>
+[EC2]   docker exec -it mysql mysql -u root -ppassword flashsale -e "UPDATE products SET stock = 10000 WHERE id = 1;"
 ```
 
 ---
 
-## 10. Understanding Auto Scaling Concepts
+## 11. Auto Scaling Concepts Explained
 
-### Cooldown Periods
+### Why Docker on EC2 instead of building on EC2?
+Building (Maven compile) takes 2-3 minutes per instance. With Docker Hub,
+a new instance just runs `docker pull` and starts in seconds. AMI also
+caches the image so pull is near-instant.
 
-After the ASG launches a new instance (scale-out), it waits for a **cooldown period**
-before evaluating whether to scale out again.
+### Cooldown Period
+After launching a new instance, ASG waits before launching another.
+Prevents launching 5 instances when only 1 more is needed.
 
-**Default cooldown: 300 seconds (5 minutes)**
-
-Why? Because new instances take time to start and begin handling traffic.
-Without cooldown, the ASG might keep launching instances while the first
-new one is still booting.
-
-**In AWS Console:**
-Auto Scaling Group → Advanced configurations → Default instance warmup
-
-Set this to **120 seconds** (2 minutes) for our setup since Spring Boot
-starts in ~30 seconds but we want a safety buffer.
-
----
-
-### Startup Delay (Instance Warm-Up)
-
-Timeline from "scale-out decision" to "instance serving traffic":
+### Startup Delay (why scaling takes ~4 minutes)
 ```
-Scale decision made         → +0:00
-EC2 instance starts booting → +0:30 to +1:30  (EC2 startup)
-User data script runs       → +1:30 to +2:00  (your startup script)
-Spring Boot starts          → +2:00 to +2:30  (app initialization)
-Health check passes (×2)    → +2:30 to +3:30  (30s interval × 2 checks)
-Instance marked healthy     → +3:30 to +4:00
-ALB starts routing traffic  → +4:00
+EC2 boots              → ~60s
+User Data script runs  → ~30s
+Spring Boot starts     → ~20s
+Health checks pass ×2  → ~60s
+Total                  → ~3-4 minutes
 ```
 
-**Total: ~3-4 minutes from decision to serving traffic.**
+### Two Levels of Health Checks
+- **EC2 check** — is the machine alive? ASG replaces dead machines.
+- **ELB check** — is the app responding on /actuator/health? ALB stops
+  routing to sick instances. Both run simultaneously.
 
-This is the "scaling lag" problem in real systems. Solutions:
-- Pre-warm instances before expected load (increase desired before the event)
-- Use Lambda for instant scaling (but more complex)
-- Keep instances warm (min=2 instead of min=1)
-
----
-
-### Health Checks
-
-There are TWO levels of health checks working together:
-
-**1. EC2 Health Check (ASG level)**
-- Checks if the EC2 instance itself is running
-- If instance crashes, ASG replaces it
-- This is basic infrastructure health
-
-**2. ELB Health Check (ALB level)**
-- Checks if the APPLICATION is responding
-- Hits `GET /actuator/health` every 30 seconds
-- If it returns non-200, instance is marked unhealthy
-- ALB stops sending traffic to unhealthy instances
-- ASG also replaces instances that fail ELB health checks
-
-**This is why we include Spring Actuator** in both services.
-
----
-
-### Scale-In Protection
-
-Scale-in (removing instances) is intentionally conservative:
-- Scale-out alarm: fires after 2 minutes of high CPU
-- Scale-in alarm: fires after 5+ minutes of low CPU
-
-Why the asymmetry? It's better to keep an extra instance running (small cost)
-than to remove it too aggressively and then spike again.
-
-**Scale-in cooldown:** After removing an instance, wait before removing another.
-
----
-
-### Target Tracking vs Step Scaling
-
-**Target Tracking (what we use):**
-- You say: "Keep CPU around 60%"
-- AWS figures out when and how many to scale
-- Simpler, AWS manages the math
-
-**Step Scaling (alternative):**
-- You say: "If CPU 60-70%, add 1. If 70-80%, add 2. If 80%+, add 3"
-- More control, more configuration
-
-For learning, target tracking is perfect.
-
----
-
-## QUICK REFERENCE
-
-| What | Value |
-|---|---|
-| Order Service port | 8080 |
-| Product Service port | 8081 |
-| Health check path | /actuator/health |
-| Scale-out threshold | CPU > 60% for 2 min |
-| Scale-in threshold | CPU < 60% for 5 min |
-| Min instances | 1 |
-| Max instances | 2 |
-| k6 smoke test | `k6 run smoke-test.js` |
-| k6 load test | `k6 run load-test.js -e BASE_URL=http://YOUR-ALB` |
-| k6 spike test | `k6 run spike-test.js -e BASE_URL=http://YOUR-ALB` |
+### Scale-Out vs Scale-In Speed
+- Scale-out: triggers after 2 minutes of CPU > 60% (fast, to handle load)
+- Scale-in: triggers after 5+ minutes of CPU < 60% (slow, to avoid thrashing)
 
 ---
 
 ## TROUBLESHOOTING
 
-**"Out of stock" immediately:**
-→ Reset stock via MySQL (see section 9)
+**New ASG instance unhealthy:**
+```bash
+ssh -i your-key.pem ec2-user@<NEW_INSTANCE_IP>
+docker ps -a                          # Is container running?
+docker logs flashsale-order           # Any startup errors?
+sudo cat /var/log/cloud-init-output.log  # Did User Data script run?
+curl http://localhost:8080/actuator/health
+```
 
-**Health check failing:**
-→ SSH into instance, run `curl http://localhost:8080/actuator/health`
-→ If 404: app isn't running. Check `~/app.log`
-→ If connection refused: app crashed or wrong port
+**Order Service can't reach Product Service:**
+```bash
+# From Order EC2
+curl http://<PRODUCT_PRIVATE_IP>:8081/products
+# If this fails, check Security Group allows port 8081 between instances
+```
 
 **Auto scaling not triggering:**
-→ Check CloudWatch alarm - is CPU actually above 60%?
-→ Try spike-test.js instead of load-test.js for higher CPU pressure
-→ Check ASG Activity tab for any error messages
+- Run spike-test.js for more aggressive load
+- Check CloudWatch → Alarms → is CPU actually above 60%?
+- Check ASG → Activity tab for any error messages
 
-**New instance not serving traffic:**
-→ Check Target Group → Targets. Is the new instance "healthy"?
-→ If "initial": still doing health checks (wait 60s)
-→ If "unhealthy": app failed to start. SSH in and check logs
-
-**k6 shows all traffic to one instance:**
-→ Normal at first! New instance takes ~4min to become healthy
-→ Once healthy, ALB uses round-robin by default
+**k6 showing only one instanceId:**
+- Normal for first 4 minutes while second instance boots
+- Once second instance is healthy, ALB round-robins between both
