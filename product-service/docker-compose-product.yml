@@ -21,7 +21,7 @@ services:
 
   product-service:
     build:
-      context: ./product-service
+      context: .
       dockerfile: Dockerfile
     container_name: flashsale-product
     ports:
