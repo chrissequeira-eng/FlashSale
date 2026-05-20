@@ -13,23 +13,32 @@ services:
     volumes:
       - mysql-data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-ppassword"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pChris@2026"]
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - flashsale-net
 
   product-service:
     image: chrisnathansequeira/flashsale-product:latest
     container_name: flashsale-product
     restart: unless-stopped
-    network_mode: host
+    ports:
+      - "8081:8081"
     environment:
-      SPRING_DATASOURCE_URL: jdbc:mysql://localhost:3306/flashsale?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/flashsale?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
       SPRING_DATASOURCE_USERNAME: root
-      SPRING_DATASOURCE_PASSWORD: password
+      SPRING_DATASOURCE_PASSWORD: Chris@2026
     depends_on:
       mysql:
         condition: service_healthy
+    networks:
+      - flashsale-net
 
 volumes:
   mysql-data:
+
+networks:
+  flashsale-net:
+    driver: bridge
