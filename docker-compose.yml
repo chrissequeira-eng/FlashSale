@@ -1,0 +1,84 @@
+version: '3.8'
+
+# ─────────────────────────────────────────────────────────────
+# Flash Sale System - Local Development Stack
+#
+# Services:
+#   mysql          → shared database (port 3306)
+#   product-service → product APIs (port 8081)
+#   order-service   → order APIs   (port 8080)
+#
+# Run: docker-compose up --build
+# Stop: docker-compose down
+# Reset DB: docker-compose down -v  (removes volumes)
+# ─────────────────────────────────────────────────────────────
+
+services:
+
+  # ── MySQL Database ────────────────────────────────────────────
+  mysql:
+    image: mysql:8.0
+    container_name: flashsale-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: Chris@2026
+      MYSQL_DATABASE: flashsale
+    ports:
+      - "3307:3306"       # Expose to host for debugging with tools like DBeaver
+    volumes:
+      - mysql-data:/var/lib/mysql   # Persist data between restarts
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pChris@2026"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - flashsale-net
+
+  # ── Product Service ───────────────────────────────────────────
+  product-service:
+    build:
+      context: ./product-service
+      dockerfile: Dockerfile
+    container_name: flashsale-product
+    ports:
+      - "8081:8081"
+    environment:
+      # Override application.yml values with Docker-specific ones
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/flashsale?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: Chris@2026
+    depends_on:
+      mysql:
+        condition: service_healthy   # Wait for MySQL to be ready
+    networks:
+      - flashsale-net
+    restart: on-failure
+
+  # ── Order Service ─────────────────────────────────────────────
+  order-service:
+    build:
+      context: ./order-service
+      dockerfile: Dockerfile
+    container_name: flashsale-order
+    ports:
+      - "8080:8080"
+    environment:
+      # "product-service" is the Docker Compose service name above
+      # Docker's internal DNS resolves it automatically
+      PRODUCT_SERVICE_URL: http://product-service:8081
+      INSTANCE_ID: docker-local
+    depends_on:
+      - product-service
+    networks:
+      - flashsale-net
+    restart: on-failure
+
+# ── Named volume for MySQL data ───────────────────────────────
+volumes:
+  mysql-data:
+
+# ── Internal network ──────────────────────────────────────────
+# Services communicate using service names as hostnames
+networks:
+  flashsale-net:
+    driver: bridge

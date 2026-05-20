@@ -1,0 +1,34 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: order-service
+
+# URL of Product Service.
+# LOCAL: http://localhost:8081
+# DOCKER: http://product-service:8081  (Docker Compose service name)
+# AWS: http://<product-service-private-ip>:8081
+product:
+  service:
+    url: ${PRODUCT_SERVICE_URL:http://localhost:8081}
+
+# Instance ID - helps identify which EC2 handled a request.
+# Override this with the actual EC2 instance ID on AWS.
+# In the launch template user-data script, we set this automatically.
+instance:
+  id: ${INSTANCE_ID:local-dev}
+
+# Spring Actuator - AWS ALB health checks hit /actuator/health
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    com.flashsale: INFO

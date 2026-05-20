@@ -1,0 +1,48 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: product-service
+
+  datasource:
+    # These values are overridden by environment variables in Docker/AWS.
+    # Locally: uses the values below.
+    # In Docker: uses SPRING_DATASOURCE_URL etc. from docker-compose.yml
+    url: jdbc:mysql://localhost:3306/flashsale?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+    username: root
+    password: Chris@2026
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      connection-timeout: 30000
+      initialization-fail-timeout: 60000
+      retry-attempts: 3
+
+  jpa:
+    hibernate:
+      # "update" automatically creates/updates tables from entities.
+      # Good for development. In production, use Flyway migrations instead.
+      ddl-auto: update
+    show-sql: true
+    # Run data.sql only after Hibernate has created the schema
+    defer-datasource-initialization: true
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQLDialect
+
+  # Seed data: insert products on startup if table is empty
+  sql:
+    init:
+      mode: always
+
+# Spring Actuator health endpoint - AWS ALB uses this to check if instance is healthy
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+
